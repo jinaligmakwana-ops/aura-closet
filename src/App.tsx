@@ -95,6 +95,9 @@ export const App: React.FC = () => {
       setWardrobe(items);
       setSavedOutfits(outfits);
       setWearLogs(logs);
+      if (items.length === 0) {
+        setCurrentOutfit(null);
+      }
       if (settings.tempUnit) setTempUnit(settings.tempUnit);
 
       // Load initial weather
@@ -141,14 +144,16 @@ export const App: React.FC = () => {
   const produceOutfit = useCallback(
     (
       locked: Record<string, ClothingItem | undefined> = {},
-      customOccasion?: Occasion | 'all'
+      customOccasion?: Occasion | 'all',
+      wardrobeOverride?: ClothingItem[]
     ) => {
-      if (!weather || wardrobe.length === 0) {
+      const activeWardrobe = wardrobeOverride || wardrobe;
+      if (!weather || activeWardrobe.length === 0) {
         setCurrentOutfit(null);
         return;
       }
       const occ = customOccasion || occasion;
-      const result = generateOutfit(wardrobe, weather, {
+      const result = generateOutfit(activeWardrobe, weather, {
         occasion: occ,
         lockedItems: locked,
       });
@@ -166,14 +171,18 @@ export const App: React.FC = () => {
   // Auth Handlers
   const handleAuthSuccess = async (user: User) => {
     setCurrentUser(user);
-    await loadUserData(user);
     setCurrentOutfit(null);
+    await loadUserData(user);
     showToast(`Welcome, ${user.name}!`);
   };
 
   const handleLogout = async () => {
     await logoutUser();
     setCurrentUser(null);
+    setWardrobe([]);
+    setSavedOutfits([]);
+    setWearLogs([]);
+    setCurrentOutfit(null);
     showToast('Signed out of closet.');
   };
 
@@ -300,8 +309,11 @@ export const App: React.FC = () => {
   const handleDeleteItem = async (id: string) => {
     const updated = await deleteWardrobeItem(id, currentUser?.id);
     setWardrobe(updated);
+    // Also refresh saved outfits in case a saved look contained this piece
+    const refreshedSaved = await getSavedOutfits(currentUser?.id);
+    setSavedOutfits(refreshedSaved);
     showToast('Garment deleted from wardrobe.');
-    produceOutfit();
+    produceOutfit({}, occasion, updated);
   };
 
   const handleToggleFavorite = async (id: string) => {

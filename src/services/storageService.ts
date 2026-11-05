@@ -1,4 +1,4 @@
-import { get, set } from 'idb-keyval';
+import { get, set, del } from 'idb-keyval';
 import { ClothingItem, GeneratedOutfit, WearLog } from '../types/wardrobe';
 import { SAMPLE_WARDROBE } from '../data/sampleWardrobe';
 import { getActiveEncryptionKey } from './authService';
@@ -14,6 +14,7 @@ const getItemsKey = (userId: string = 'user_jinali') => `wardrobe_items_${userId
 const getSavedKey = (userId: string = 'user_jinali') => `saved_outfits_${userId}_v2`;
 const getLogsKey = (userId: string = 'user_jinali') => `wear_logs_${userId}_v2`;
 const getSettingsKey = (userId: string = 'user_jinali') => `wardrobe_settings_${userId}_v2`;
+const getInitKey = (userId: string = 'user_jinali') => `wardrobe_initialized_${userId}_v2`;
 
 export interface UserSettings {
   tempUnit: 'C' | 'F';
@@ -92,30 +93,43 @@ async function secureWrite<T>(key: string, data: T): Promise<void> {
 export async function getWardrobeItems(userId: string = 'user_jinali'): Promise<ClothingItem[]> {
   try {
     const key = getItemsKey(userId);
+    const initKey = getInitKey(userId);
+
+    const isInitialized = await get<boolean>(initKey);
     let items = await secureRead<ClothingItem[]>(key);
 
-    if (!items || items.length === 0) {
-      // Check legacy unencrypted items if migrating
-      const legacyKey = `wardrobe_items_${userId}_v1`;
-      let legacyItems = await get<ClothingItem[]>(legacyKey);
-      if (!legacyItems && userId === 'user_jinali') {
-        legacyItems = await get<ClothingItem[]>(LEGACY_ITEMS_KEY);
-      }
-
-      if (legacyItems && legacyItems.length > 0) {
-        items = legacyItems;
-        await secureWrite(key, items);
-        return items;
-      }
-
-      // Seed initial wardrobe
-      await secureWrite(key, SAMPLE_WARDROBE);
-      return SAMPLE_WARDROBE;
+    // If items exists (even if empty []), respect user's data!
+    if (items !== null) {
+      return items;
     }
-    return items;
+
+    // If user has already initialized their closet, do not re-seed
+    if (isInitialized) {
+      return [];
+    }
+
+    // First-time setup: mark initialized
+    await set(initKey, true);
+
+    // Check legacy unencrypted items if migrating
+    const legacyKey = `wardrobe_items_${userId}_v1`;
+    let legacyItems = await get<ClothingItem[]>(legacyKey);
+    if (!legacyItems && userId === 'user_jinali') {
+      legacyItems = await get<ClothingItem[]>(LEGACY_ITEMS_KEY);
+    }
+
+    if (legacyItems && legacyItems.length > 0) {
+      items = legacyItems;
+      await secureWrite(key, items);
+      return items;
+    }
+
+    // Seed initial wardrobe on first ever run
+    await secureWrite(key, SAMPLE_WARDROBE);
+    return SAMPLE_WARDROBE;
   } catch (err) {
     console.error('Failed to load items from IndexedDB:', err);
-    return SAMPLE_WARDROBE;
+    return [];
   }
 }
 
@@ -155,6 +169,28 @@ export async function deleteWardrobeItem(
   const current = (await secureRead<ClothingItem[]>(key)) || [];
   const updated = current.filter((item) => item.id !== id);
   await secureWrite(key, updated);
+
+  // Clean up any saved outfits that contained this deleted piece
+  try {
+    const savedKey = getSavedKey(userId);
+    const saved = (await secureRead<GeneratedOutfit[]>(savedKey)) || [];
+    const cleanedSaved = saved
+      .map((outfit) => {
+        const cleaned: GeneratedOutfit = { ...outfit };
+        if (cleaned.top?.id === id) delete cleaned.top;
+        if (cleaned.bottom?.id === id) delete cleaned.bottom;
+        if (cleaned.dress?.id === id) delete cleaned.dress;
+        if (cleaned.outerwear?.id === id) delete cleaned.outerwear;
+        if (cleaned.shoes?.id === id) delete cleaned.shoes;
+        if (cleaned.accessory?.id === id) delete cleaned.accessory;
+        return cleaned;
+      })
+      .filter((outfit) => outfit.top || outfit.bottom || outfit.dress || outfit.outerwear || outfit.shoes || outfit.accessory);
+    await secureWrite(savedKey, cleanedSaved);
+  } catch (err) {
+    console.warn('Error cleaning up saved outfits after item deletion:', err);
+  }
+
   return updated;
 }
 
@@ -287,7 +323,26 @@ export async function resetToSampleWardrobe(userId: string = 'user_jinali'): Pro
 
 export async function clearAllWardrobe(userId: string = 'user_jinali'): Promise<ClothingItem[]> {
   const key = getItemsKey(userId);
+  const savedKey = getSavedKey(userId);
+  const logsKey = getLogsKey(userId);
+  const initKey = getInitKey(userId);
+
+  await set(initKey, true);
   await secureWrite(key, []);
+  await secureWrite(savedKey, []);
+  await secureWrite(logsKey, []);
+
+  // Remove legacy keys if user_jinali to prevent resurrecting
+  if (userId === 'user_jinali') {
+    try {
+      await del(LEGACY_ITEMS_KEY);
+      await del(LEGACY_SAVED_OUTFITS_KEY);
+      await del(LEGACY_WEAR_LOGS_KEY);
+    } catch {
+      // ignore
+    }
+  }
+
   return [];
 }
 
